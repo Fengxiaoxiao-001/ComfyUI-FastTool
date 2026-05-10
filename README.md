@@ -1,8 +1,8 @@
 # 🚀 ComfyUI-FastTool
 
-**Alleviate VRAM pressure, improve K-sampling speed.**
+**Alleviate VRAM pressure, improve K-sampling speed.【The node's growth is not significant when the video memory is sufficient】**
 
-**缓解显存压力，显著提升 K 采样速度。**
+**缓解显存压力，显著提升 K 采样速度。【显存足够时该节点增速不明显】**
 
 ## 📖 Introduction | 简介
 
@@ -50,21 +50,29 @@ To ensure proper VRAM optimization without breaking prompt encoding, the `🔄 V
 
 ### 🧩 Workflow Placement / 连线示意图
 
-[【SDXL】多 LoRA 堆叠器] (定义 LoRA 列表与权重)
-│
-▼
-[【SDXL】Model Mixer] (加载基础模型并输出已注入 LoRA 的 CLIP)
-│
-▼
+  [【SDXL】多 LoRA 堆叠器] (定义 LoRA 列表与权重)
+           │
+           │ (lora_stack)
+           ▼
+  [【SDXL】Model Mixer] (加载基础模型并输出已注入 LoRA 的 CLIP)
+           │
+           │ (CLIP 输出)
+           ▼
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃   🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）         ┃  <--- MUST BE PLACED HERE! (必须接在这里!)
+┃                                                        ┃
+┃   🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）         ┃
+┃                                                        ┃
+┃   <--- MUST BE PLACED HERE! (必须接在这里!)            ┃     【注意显存不足的才要加，显存足够的不需要这个节点，这个节点K采样降低速度】
+┃                                                        ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-│
-▼
-[CLIP Text Encode (Prompt) / CLIP 文本编码器] (进行提示词编码)
-│
-▼
-[K Sampler / K 采样器] (开始采样生成)
+           │
+           │ (Offloaded CLIP)
+           ▼
+  [CLIP Text Encode (Prompt) / CLIP 文本编码器]
+           │
+           │ (CONDITIONING)
+           ▼
+  [K Sampler / K 采样器] (开始采样生成)
 ```
 
 ---
