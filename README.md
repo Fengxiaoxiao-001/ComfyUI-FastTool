@@ -50,20 +50,21 @@ To ensure proper VRAM optimization without breaking prompt encoding, the `🔄 V
 
 ### 🧩 Workflow Placement / 连线示意图
 
-```text
-  [Checkpoint Loader] (Outputs CLIP / 输出 CLIP)
-           │
-           ▼
-  [LoRA Loader / 多 LoRA 堆叠器] (Passes CLIP through / 经过 LoRA 加载)
-           │
-           ▼
+[【SDXL】多 LoRA 堆叠器] (定义 LoRA 列表与权重)
+│
+▼
+[【SDXL】Model Mixer] (加载基础模型并输出已注入 LoRA 的 CLIP)
+│
+▼
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃   🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）         ┃  <--- MUST BE PLACED HERE! (必须接在这里!)
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-           │
-           ▼
-  [CLIP Text Encode (Prompt) / CLIP 文本编码器] 
-
+│
+▼
+[CLIP Text Encode (Prompt) / CLIP 文本编码器] (进行提示词编码)
+│
+▼
+[K Sampler / K 采样器] (开始采样生成)
 ```
 
 ---
