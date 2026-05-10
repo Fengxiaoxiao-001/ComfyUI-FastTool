@@ -12,6 +12,6 @@ dependencies = []
 Repository = "https://github.com/Fengxiaoxiao-001/ComfyUI-FastTool"
 
 [tool.comfy]
-PublisherId = "FENGXIAOXIAO"
+PublisherId = "fengxiaoxiao"
 DisplayName = "ComfyUI-FastTool"
 Icon = ""
