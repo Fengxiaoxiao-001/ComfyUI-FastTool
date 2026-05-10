@@ -1,4 +1,6 @@
 ---
+title: ComfyUI-FastTool
+---
 # ComfyUI-FastTool
 
 **Alleviate VRAM pressure, improve K-sampling speed. (The node's growth is not significant when the video memory is sufficient)**
