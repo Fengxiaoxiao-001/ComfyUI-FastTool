@@ -50,7 +50,7 @@ To ensure proper VRAM optimization without breaking prompt encoding, the `🔄 V
 
 ### 🧩 Workflow Placement / 连线示意图
 
-  [【SDXL】多 LoRA 堆叠器] (定义 LoRA 列表与权重)
+[【SDXL】多 LoRA 堆叠器] (定义 LoRA 列表与权重)
            │
            │ (lora_stack)
            ▼
@@ -62,7 +62,7 @@ To ensure proper VRAM optimization without breaking prompt encoding, the `🔄 V
 ┃                                                        ┃
 ┃   🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）         ┃
 ┃                                                        ┃
-┃   <--- MUST BE PLACED HERE! (必须接在这里!)            ┃     【注意显存不足的才要加，显存足够的不需要这个节点，这个节点K采样降低速度】
+┃   <--- MUST BE PLACED HERE! (必须接在这里!)            ┃
 ┃                                                        ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
            │
