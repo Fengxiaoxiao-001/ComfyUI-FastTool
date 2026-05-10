@@ -1,0 +1,17 @@
+[project]
+name = "comfyui-fasttool"
+description = "A fast tool utility for ComfyUI"
+version = "0.0.1"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Fengxiaoxiao-001" }
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Fengxiaoxiao-001/ComfyUI-FastTool"
+
+[tool.comfy]
+PublisherId = "Fengxiaoxiao-001"
+DisplayName = "ComfyUI-FastTool"
+Icon = ""
