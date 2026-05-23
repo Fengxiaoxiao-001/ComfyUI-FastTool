@@ -217,4 +217,4 @@ class SeparateModelMixerDictFuser:
 
 
 NODE_CLASS_MAPPINGS = {"SeparateModelMixerDictFuser": SeparateModelMixerDictFuser}
-NODE_DISPLAY_NAME_MAPPINGS = {"SeparateModelMixerDictFuser": "🛠️ Anima模型烧录器"}
+NODE_DISPLAY_NAME_MAPPINGS = {"SeparateModelMixerDictFuser": "️Anima模型烧录器"}
