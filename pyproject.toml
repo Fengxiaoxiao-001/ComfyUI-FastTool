@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-fasttool"
 description = "A fast tool utility for ComfyUI"
-version = "0.0.1"
+version = "0.0.2"
 license = { file = "LICENSE" }
 authors = [
     { name = "Fengxiaoxiao-001" }
