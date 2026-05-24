@@ -19,7 +19,12 @@ A professional model fusion and VRAM optimization toolkit for ComfyUI. **ComfyUI
 **[Updates/更新]**
 
 Anima Model Burner has been added. The node name is Anima模型烧录器.
+
+Reduce VRAM usage when Anima is added to Lora
+
 加入了Anima模型烧录器,节点名字为Anima模型烧录器.
+
+降低Anima加入lora时的显存占用
 
 ## ✨ Included Nodes | 包含节点
 
