@@ -10,17 +10,16 @@ from .LoraStack import (
     MultiLoRAStack
 )
 
+from .AnimaLoader import (
+    SeparateModelMixerDictFuser
+)
+
 NODE_CLASS_MAPPINGS = {
     "VRAM_CLIP_Offloader": VRAM_CLIP_Offloader,
     "TrueModelMixerDictFuser": TrueModelMixerDictFuser,
     "MultiLoRAStack": MultiLoRAStack,
     "SeparateModelMixerDictFuser": SeparateModelMixerDictFuser
 }
-
-from .AnimaLoader import (
-    SeparateModelMixerDictFuser
-)
-
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VRAM_CLIP_Offloader": "🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）",
