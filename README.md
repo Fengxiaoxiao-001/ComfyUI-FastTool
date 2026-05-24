@@ -17,6 +17,7 @@ A professional model fusion and VRAM optimization toolkit for ComfyUI. **ComfyUI
 
 ---
 **[Updates/更新]**
+
 Anima Model Burner has been added. The node name is Anima模型烧录器.
 加入了Anima模型烧录器,节点名字为Anima模型烧录器.
 
