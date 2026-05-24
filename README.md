@@ -22,9 +22,13 @@ Anima Model Burner has been added. The node name is Anima模型烧录器.
 
 Reduce VRAM usage when Anima is added to Lora
 
+The usage method is exactly the same as that of the [SDXL] multi-LoRA stacker.
+
 加入了Anima模型烧录器,节点名字为Anima模型烧录器.
 
 降低Anima加入lora时的显存占用
+
+使用方法和【SDXL】多 LoRA 堆叠器完全一致
 
 ## ✨ Included Nodes | 包含节点
 
