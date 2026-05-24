@@ -16,6 +16,9 @@ A professional model fusion and VRAM optimization toolkit for ComfyUI. **ComfyUI
 一款专业的 ComfyUI 模型融合与显存优化工具箱。**ComfyUI-FastTool** 能够将 LoRA 彻底物理烧录到底模中（支持 **BF16 / FP16 / FP32** 精度自定义），并支持将 CLIP 权重移出显存至系统内存，从而大幅释放显存占用，显著提升 K 采样性能。对于受限于显存容量（如 8G/12G 显卡）的用户来说，这是必备的优化神器。
 
 ---
+**[Updates/更新]**
+Anima Model Burner has been added. The node name is Anima模型烧录器.
+加入了Anima模型烧录器,节点名字为Anima模型烧录器.
 
 ## ✨ Included Nodes | 包含节点
 
