@@ -17,6 +17,11 @@ NODE_CLASS_MAPPINGS = {
     "SeparateModelMixerDictFuser": SeparateModelMixerDictFuser
 }
 
+from .AnimaLoader import (
+    SeparateModelMixerDictFuser
+)
+
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VRAM_CLIP_Offloader": "🔄 VRAM CLIP Offloader（CLIP 搬到 CPU/NPU）",
     "TrueModelMixerDictFuser": "️【SDXL】 Model Mixer ",
