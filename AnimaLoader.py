@@ -334,16 +334,58 @@ class RuntimeModTextAdapter(nn.Module):
 
 
 class RuntimeLocalConvAdapter(nn.Module):
-    def __init__(self, dim, kernel_size=3):
+
+    def __init__(self, dim, kernel_size=3, use_bias=True):
         super().__init__()
+
+        kernel_size = int(kernel_size)
+        if kernel_size < 1:
+            kernel_size = 3
+
+        self.dim = int(dim)
+        self.kernel_size = kernel_size
+
         self.dwconv = nn.Conv2d(
             dim,
             dim,
             kernel_size,
             padding=kernel_size // 2,
             groups=dim,
+            bias=bool(use_bias),
         )
+
+        if self.dwconv.bias is not None:
+            nn.init.zeros_(self.dwconv.bias)
+
         self.pwconv = ZeroLinear(dim)
+
+    @staticmethod
+    def _match_hw(y, target_h, target_w):
+
+        if y.ndim != 4:
+            return y
+
+        _, _, h, w = y.shape
+
+        if h > target_h:
+            start = (h - target_h) // 2
+            y = y[:, :, start:start + target_h, :]
+        elif h < target_h:
+            pad_total = target_h - h
+            pad_top = pad_total // 2
+            pad_bottom = pad_total - pad_top
+            y = F.pad(y, (0, 0, pad_top, pad_bottom))
+
+        if w > target_w:
+            start = (w - target_w) // 2
+            y = y[:, :, :, start:start + target_w]
+        elif w < target_w:
+            pad_total = target_w - w
+            pad_left = pad_total // 2
+            pad_right = pad_total - pad_left
+            y = F.pad(y, (pad_left, pad_right, 0, 0))
+
+        return y
 
     def forward(self, x, h=None, w=None):
         init_ndim = x.ndim
@@ -369,8 +411,15 @@ class RuntimeLocalConvAdapter(nn.Module):
             return x
 
         b, t, hh, ww, c = x.shape
+
+        if c != self.dim:
+            return x
+
         y = x.permute(0, 1, 4, 2, 3).reshape(b * t, c, hh, ww)
         y = self.dwconv(y)
+
+        y = self._match_hw(y, hh, ww)
+
         y = y.reshape(b, t, c, hh, ww).permute(0, 1, 3, 4, 2)
 
         out = x + self.pwconv(y)
@@ -568,66 +617,87 @@ class RuntimeAnimaAdapter(nn.Module):
             has_mod_text=False,
             has_contrast=False,
             has_color=False,
+            local_kernel_size=3,
     ):
         super().__init__()
 
-        self.dit_hidden_size = dit_hidden_size
-        self.text_embed_dim = text_embed_dim
-        self.style_dim = style_dim
-        self.num_blocks = num_blocks
+        self.dit_hidden_size = int(dit_hidden_size)
+        self.text_embed_dim = int(text_embed_dim)
+        self.style_dim = int(style_dim)
+        self.num_blocks = int(num_blocks)
 
-        self.local_count = local_count
-        self.edge_count = edge_count
-        self.subject_count = subject_count
-        self.style_count = style_count
+        self.local_count = int(local_count)
+        self.edge_count = int(edge_count)
+        self.subject_count = int(subject_count)
+        self.style_count = int(style_count)
 
-        self.local_start = num_blocks - local_count if local_start is None else local_start
-        self.edge_start = edge_start
-        self.subject_start = subject_start
-        self.style_start = num_blocks - style_count if style_start is None else style_start
+        self.local_start = self.num_blocks - self.local_count if local_start is None else int(local_start)
+        self.edge_start = int(edge_start)
+        self.subject_start = int(subject_start)
+        self.style_start = self.num_blocks - self.style_count if style_start is None else int(style_start)
 
-        self.has_semantic = has_semantic
-        self.has_mod_text = has_mod_text
-        self.has_contrast = has_contrast
-        self.has_color = has_color
+        self.has_semantic = bool(has_semantic)
+        self.has_mod_text = bool(has_mod_text)
+        self.has_contrast = bool(has_contrast)
+        self.has_color = bool(has_color)
 
-        self.semantic_scale = RuntimeSemanticScaleAdapter(text_embed_dim) if has_semantic else None
-        self.mod_text = RuntimeModTextAdapter(text_embed_dim, dit_hidden_size) if has_mod_text else None
-        self.contrast_mod = RuntimeContrastModAdapter(text_embed_dim) if has_contrast else None
-        self.color_tune = RuntimeColorTuneAdapter(text_embed_dim) if has_color else None
+        if isinstance(local_kernel_size, (list, tuple)):
+            local_kernel_sizes = [int(x) for x in local_kernel_size]
+            if len(local_kernel_sizes) < self.local_count:
+                local_kernel_sizes += [local_kernel_sizes[-1] if local_kernel_sizes else 3] * (
+                        self.local_count - len(local_kernel_sizes)
+                )
+            local_kernel_sizes = local_kernel_sizes[:self.local_count]
+        else:
+            local_kernel_sizes = [int(local_kernel_size)] * self.local_count
+
+        local_kernel_sizes = [k if k >= 1 else 3 for k in local_kernel_sizes]
+        self.local_kernel_sizes = local_kernel_sizes
+
+        self.semantic_scale = RuntimeSemanticScaleAdapter(self.text_embed_dim) if self.has_semantic else None
+        self.mod_text = RuntimeModTextAdapter(self.text_embed_dim, self.dit_hidden_size) if self.has_mod_text else None
+        self.contrast_mod = RuntimeContrastModAdapter(self.text_embed_dim) if self.has_contrast else None
+        self.color_tune = RuntimeColorTuneAdapter(self.text_embed_dim) if self.has_color else None
 
         self.local_convs = nn.ModuleList(
-            [RuntimeLocalConvAdapter(dit_hidden_size) for _ in range(local_count)]
+            [
+                RuntimeLocalConvAdapter(
+                    self.dit_hidden_size,
+                    kernel_size=local_kernel_sizes[i],
+                    use_bias=True,
+                )
+                for i in range(self.local_count)
+            ]
         )
 
         self.edge_details = nn.ModuleList(
-            [RuntimeEdgeDetailConv(dit_hidden_size) for _ in range(edge_count)]
+            [RuntimeEdgeDetailConv(self.dit_hidden_size) for _ in range(self.edge_count)]
         )
 
         self.subject_blocks = nn.ModuleList(
             [
                 RuntimeSubjectCrossAttention(
-                    query_dim=dit_hidden_size,
-                    text_dim=text_embed_dim,
+                    query_dim=self.dit_hidden_size,
+                    text_dim=self.text_embed_dim,
                     num_heads=subject_heads,
                 )
-                for _ in range(subject_count)
+                for _ in range(self.subject_count)
             ]
         )
 
         self.style_blocks = nn.ModuleList(
             [
                 RuntimeStyleCrossAttention(
-                    query_dim=dit_hidden_size,
-                    context_dim=style_dim,
+                    query_dim=self.dit_hidden_size,
+                    context_dim=self.style_dim,
                     num_heads=style_heads,
                 )
-                for _ in range(style_count)
+                for _ in range(self.style_count)
             ]
         )
 
-        if style_count > 0:
-            self.style_scale = nn.Parameter(torch.zeros(style_count))
+        if self.style_count > 0:
+            self.style_scale = nn.Parameter(torch.zeros(self.style_count))
         else:
             self.register_parameter("style_scale", None)
 
@@ -674,6 +744,80 @@ class RuntimeAnimaAdapter(nn.Module):
                 max_idx = max(max_idx, int(parts[1]))
         return max_idx + 1
 
+    @staticmethod
+    def _detect_local_kernel_sizes(sd, local_count):
+
+        kernel_sizes = [3] * int(local_count)
+
+        for k, v in sd.items():
+            if not torch.is_tensor(v):
+                continue
+
+            parts = k.split(".")
+
+            if len(parts) != 4:
+                continue
+
+            if parts[0] != "local_convs":
+                continue
+
+            if not parts[1].isdigit():
+                continue
+
+            if parts[2] != "dwconv" or parts[3] != "weight":
+                continue
+
+            if v.ndim != 4:
+                continue
+
+            idx = int(parts[1])
+            if idx < 0 or idx >= local_count:
+                continue
+
+            kh = int(v.shape[2])
+            kw = int(v.shape[3])
+
+            if kh != kw:
+                print(
+                    f"⚠️ [AnimaAdapter] local_convs.{idx}.dwconv.weight 是非正方形卷积核: "
+                    f"{kh}x{kw}，将使用 kh={kh}"
+                )
+
+            kernel_sizes[idx] = kh
+
+        return kernel_sizes
+
+    @staticmethod
+    def _filter_state_dict_by_shape(model, sd):
+
+        model_sd = model.state_dict()
+        filtered = {}
+        skipped = []
+
+        for k, v in sd.items():
+            if k not in model_sd:
+                filtered[k] = v
+                continue
+
+            if not torch.is_tensor(v) or not torch.is_tensor(model_sd[k]):
+                filtered[k] = v
+                continue
+
+            if tuple(v.shape) != tuple(model_sd[k].shape):
+                skipped.append((k, tuple(v.shape), tuple(model_sd[k].shape)))
+                continue
+
+            filtered[k] = v
+
+        if skipped:
+            print(f"⚠️ [AnimaAdapter] 跳过 shape 不匹配权重: {len(skipped)} 个")
+            for item in skipped[:16]:
+                print(f"   - {item[0]}: checkpoint={item[1]} runtime={item[2]}")
+            if len(skipped) > 16:
+                print(f"   ... 还有 {len(skipped) - 16} 个未显示")
+
+        return filtered
+
     @classmethod
     def from_state_dict(cls, sd, num_blocks=28):
         sd = cls._normalize_state_dict(sd)
@@ -682,39 +826,52 @@ class RuntimeAnimaAdapter(nn.Module):
         text_embed_dim = 1024
         style_dim = 768
 
-        if "semantic_scale.scale" in sd:
+        if "semantic_scale.scale" in sd and torch.is_tensor(sd["semantic_scale.scale"]):
             text_embed_dim = sd["semantic_scale.scale"].numel()
 
-        if "contrast_mod.gamma" in sd:
+        if "contrast_mod.gamma" in sd and torch.is_tensor(sd["contrast_mod.gamma"]):
             text_embed_dim = sd["contrast_mod.gamma"].numel()
 
-        if "color_tune.shift" in sd:
+        if "color_tune.shift" in sd and torch.is_tensor(sd["color_tune.shift"]):
             text_embed_dim = sd["color_tune.shift"].numel()
 
-        if "mod_text.text_proj.0.weight" in sd:
+        if "mod_text.text_proj.0.weight" in sd and torch.is_tensor(sd["mod_text.text_proj.0.weight"]):
             w = sd["mod_text.text_proj.0.weight"]
-            text_embed_dim = w.shape[1]
-            dit_hidden_size = w.shape[0] // 2
+            if w.ndim == 2:
+                text_embed_dim = int(w.shape[1])
+                dit_hidden_size = int(w.shape[0] // 2)
 
         for k, v in sd.items():
-            if k.endswith("dwconv.weight") and v.ndim == 4:
-                dit_hidden_size = v.shape[0]
+            if (
+                    k.startswith("local_convs.")
+                    and k.endswith(".dwconv.weight")
+                    and torch.is_tensor(v)
+                    and v.ndim == 4
+            ):
+                dit_hidden_size = int(v.shape[0])
                 break
 
         for k, v in sd.items():
-            if k.endswith("to_q.weight") and v.ndim == 2:
-                dit_hidden_size = v.shape[0]
+            if k.endswith("to_q.weight") and torch.is_tensor(v) and v.ndim == 2:
+                dit_hidden_size = int(v.shape[0])
                 break
 
         for k, v in sd.items():
-            if k.startswith("style_blocks.") and k.endswith("to_k.weight") and v.ndim == 2:
-                style_dim = v.shape[1]
+            if (
+                    k.startswith("style_blocks.")
+                    and k.endswith("to_k.weight")
+                    and torch.is_tensor(v)
+                    and v.ndim == 2
+            ):
+                style_dim = int(v.shape[1])
                 break
 
         local_count = cls._count_indexed(sd, "local_convs")
         edge_count = cls._count_indexed(sd, "edge_details")
         subject_count = cls._count_indexed(sd, "subject_blocks")
         style_count = cls._count_indexed(sd, "style_blocks")
+
+        local_kernel_sizes = cls._detect_local_kernel_sizes(sd, local_count)
 
         has_semantic = any(k.startswith("semantic_scale.") for k in sd.keys())
         has_mod_text = any(k.startswith("mod_text.") for k in sd.keys())
@@ -738,9 +895,10 @@ class RuntimeAnimaAdapter(nn.Module):
             has_mod_text=has_mod_text,
             has_contrast=has_contrast,
             has_color=has_color,
+            local_kernel_size=local_kernel_sizes,
         )
 
-        if style_count > 0 and "style_scale" in sd:
+        if style_count > 0 and "style_scale" in sd and torch.is_tensor(sd["style_scale"]):
             old = sd["style_scale"]
             if old.numel() != style_count:
                 fixed = torch.zeros(style_count, dtype=old.dtype, device=old.device)
@@ -748,21 +906,35 @@ class RuntimeAnimaAdapter(nn.Module):
                 fixed[:n] = old[:n]
                 sd["style_scale"] = fixed
 
-        missing, unexpected = adapter.load_state_dict(sd, strict=False)
+        sd_to_load = cls._filter_state_dict_by_shape(adapter, sd)
+
+        missing, unexpected = adapter.load_state_dict(sd_to_load, strict=False)
+
+        missing_local_bias = [
+            k for k in missing
+            if k.startswith("local_convs.") and k.endswith(".dwconv.bias")
+        ]
 
         if missing:
             print(f"⚠️ [AnimaAdapter] 缺失权重: {len(missing)}")
-            print(f"   前几个缺失: {missing[:5]}")
+            print(f"   前几个缺失: {missing[:8]}")
+
+            if missing_local_bias:
+                print(
+                    f"ℹ️ [AnimaAdapter] 检测到 {len(missing_local_bias)} 个 local_conv dwconv.bias 缺失，"
+                    f"已使用零初始化，避免随机 bias 影响画风。"
+                )
 
         if unexpected:
             print(f"⚠️ [AnimaAdapter] 额外权重: {len(unexpected)}")
-            print(f"   前几个额外: {unexpected[:5]}")
+            print(f"   前几个额外: {unexpected[:8]}")
 
         print(
             "ℹ️ [AnimaAdapter] 结构: "
             f"semantic={has_semantic}, mod_text={has_mod_text}, "
             f"contrast={has_contrast}, color={has_color}, "
             f"local={local_count}@{adapter.local_start}, "
+            f"local_kernel={local_kernel_sizes}, "
             f"edge={edge_count}@{adapter.edge_start}, "
             f"subject={subject_count}@{adapter.subject_start}, "
             f"style={style_count}@{adapter.style_start}, style_dim={style_dim}"
