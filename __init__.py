@@ -22,6 +22,11 @@ from .ImageObfuscation import (
     XiaoxiaoDecrypt
 )
 
+from .ChordEdit_SDXL import (
+    SDXLChordEditNode,
+    SDXLChordEditReleaseCacheNode,
+)
+
 NODE_CLASS_MAPPINGS = {
     "VRAM_CLIP_Offloader": VRAM_CLIP_Offloader,
     "TrueModelMixerDictFuser": TrueModelMixerDictFuser,
@@ -31,7 +36,11 @@ NODE_CLASS_MAPPINGS = {
     "AnimaDeviceFix": AnimaDeviceFix,
     "SeparateModelMixerDictFuser": SeparateModelMixerDictFuser,
     "XiaoxiaoEncrypt": XiaoxiaoEncrypt,
-    "XiaoxiaoDecrypt": XiaoxiaoDecrypt
+    "XiaoxiaoDecrypt": XiaoxiaoDecrypt,
+    "ComfySDXLChordEdit": SDXLChordEditNode,
+    "ComfySDXLChordEditReleaseCache": (
+        SDXLChordEditReleaseCacheNode
+    ),
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -43,7 +52,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaDeviceFix": "Anima 设备修复器",
     "SeparateModelMixerDictFuser": "️Anima模型烧录器",
     "XiaoxiaoEncrypt": "🔒 Xiaoxiao Encrypt (潇潇图片混淆)",
-    "XiaoxiaoDecrypt": "🔓 Xiaoxiao Decrypt (潇潇图片解混淆)"
+    "XiaoxiaoDecrypt": "🔓 Xiaoxiao Decrypt (潇潇图片解混淆)",
+    "ComfySDXLChordEdit": (
+        "SDXL ChordEdit (MODEL/CLIP/VAE)"
+    ),
+    "ComfySDXLChordEditReleaseCache": (
+        "SDXL ChordEdit Release Cache"
+    ),
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
