@@ -17,6 +17,11 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_SEED = 42
 
 
+# =========================================================================
+# 通用工具
+# =========================================================================
+
+
 def _round_to_multiple(value: int, multiple: int = 8) -> int:
     value = int(value)
     multiple = max(1, int(multiple))
@@ -26,6 +31,10 @@ def _round_to_multiple(value: int, multiple: int = 8) -> int:
 def _center_crop_bhwc(
         image: torch.Tensor,
 ) -> Tuple[torch.Tensor, int, int]:
+    """
+    返回：
+        cropped_image, crop_x, crop_y
+    """
     if image.ndim != 4:
         raise ValueError(
             "IMAGE 必须是 [B,H,W,C] 四维张量，"
@@ -254,6 +263,9 @@ def _tensor_stats(name: str, tensor: torch.Tensor) -> None:
 
 
 def unwrap_comfy_condition(value: Any) -> Any:
+    """
+    解包 ComfyUI 条件包装对象（例如 CONDRegular），返回底层值。
+    """
     visited: set[int] = set()
 
     while value is not None and not torch.is_tensor(value):
@@ -274,6 +286,9 @@ def unwrap_comfy_condition(value: Any) -> Any:
 
 
 def _get_comfy_api_function(name: str):
+    """
+    兼容不同 ComfyUI 版本中 samplers / sampler_helpers 的 API 位置。
+    """
     module_names = (
         "comfy.samplers",
         "comfy.sampler_helpers",
@@ -296,6 +311,24 @@ def _get_comfy_api_function(name: str):
 def _convert_comfy_conditioning(
         conditioning: list,
 ) -> List[Dict[str, Any]]:
+    """
+    将节点层 CONDITIONING：
+
+        [[cross_attn_tensor, metadata_dict], ...]
+
+    转为 ComfyUI 内部 CONDITIONING：
+
+        [{
+            "model_conds": {
+                "c_crossattn": CONDRegular(...),
+                ...
+            },
+            ...
+        }, ...]
+
+    注意：convert_cond 后还必须通过 encode_model_conds，
+    才能为 SDXL 生成 c_adm 等额外条件。
+    """
     if not isinstance(conditioning, list):
         raise TypeError(
             "待转换的 conditioning 必须是 list，"
@@ -345,6 +378,17 @@ def _encode_comfy_model_conds(
         converted_conditioning: List[Dict[str, Any]],
         latent: torch.Tensor,
 ) -> List[Dict[str, Any]]:
+    """
+    使用 ComfyUI 新版 encode_model_conds() 补全模型条件。
+
+    注意：
+    encode_model_conds() 的第一个参数必须是模型的 extra_conds 方法，
+    例如：
+
+        model_patcher.model.extra_conds
+
+    不能直接传入 model_patcher，也不能直接传入 torch 模型对象。
+    """
     encode_model_conds = _get_comfy_api_function(
         "encode_model_conds"
     )
@@ -371,7 +415,7 @@ def _encode_comfy_model_conds(
             "positive",
         )
     except TypeError:
-
+        # 兼容部分 ComfyUI 版本的 keyword-only 参数形式。
         encoded = encode_model_conds(
             model_extra_conds,
             converted_conditioning,
@@ -392,6 +436,11 @@ def _encode_comfy_model_conds(
         )
 
     return encoded
+
+
+# =========================================================================
+# SDXL 条件
+# =========================================================================
 
 
 @dataclass
@@ -672,11 +721,18 @@ def _concat_conditioning(
     )
 
 
+# =========================================================================
+# ComfyUI MODEL 适配器
+# =========================================================================
+
+
 class ComfySDXLModelAdapter:
     def __init__(self, model: Any) -> None:
         if model is None:
             raise ValueError("MODEL 输入不能为空。")
 
+        # ModelPatcher 用于模型加载及获取 model_options。
+        # calc_cond_batch() 在新版 ComfyUI 中需要底层 BaseModel。
         self.model_patcher = model
         self.base_model = model.model
 
@@ -760,7 +816,15 @@ class ComfySDXLModelAdapter:
             self,
             device: torch.device,
     ) -> Tuple[Any, bool]:
+        """
+        为 calc_cond_batch() 激活 BaseModel。
 
+        返回：
+            active_model, should_unpatch
+
+        此逻辑只处理 ComfyUI MODEL / ModelPatcher 生命周期，
+        不修改 ChordEdit 的核心计算。
+        """
         patcher = self.model_patcher
 
         model_management.load_models_gpu([patcher])
@@ -768,20 +832,25 @@ class ComfySDXLModelAdapter:
         base_model = patcher.model
         current_patcher = getattr(base_model, "current_patcher", None)
 
+        # 已经由当前 patcher 正确激活。
         if current_patcher is patcher:
             return base_model, False
 
+        # 不应覆盖其他 patcher 的状态。
         if current_patcher is not None and current_patcher is not patcher:
             raise RuntimeError(
                 "SDXL ChordEdit 无法激活 MODEL：底层模型当前正被另一个 "
                 "ModelPatcher 使用。"
             )
 
+        # 新旧 ComfyUI 兼容。
         try:
             active_model = patcher.patch_model(device_to=device)
         except TypeError:
             active_model = patcher.patch_model(device=device)
 
+        # 某些新版/特殊模型环境中 patch_model() 不会自动挂载。
+        # 此处仅为 calc_cond_batch() 提供必要运行状态。
         if getattr(active_model, "current_patcher", None) is not patcher:
             LOGGER.debug(
                 "patch_model() 未自动设置 current_patcher，"
@@ -796,7 +865,14 @@ class ComfySDXLModelAdapter:
             conditioning: ComfySDXLConditioning,
             batch_size: int,
     ) -> list:
+        """
+        将自定义条件打包成节点层原始 CONDITIONING 格式：
 
+            [[cross_attn, metadata]]
+
+        注意：该返回值还不能直接交给 calc_cond_batch()，
+        必须先经过 comfy.samplers.convert_cond()。
+        """
         cross_attn = _repeat_batch(
             conditioning.cross_attn,
             batch_size,
@@ -837,9 +913,14 @@ class ComfySDXLModelAdapter:
             round(float(time_ids[0, 5].item()))
         )
 
+        # 这里必须使用 ComfyUI SDXL 标准字段名。
+        #
+        # encode_model_conds() 会读取这些字段，
+        # 并根据它们创建 SDXL 所需的 c_adm 条件。
         cond_dict = {
             "pooled_output": pooled,
 
+            # 标准 ComfyUI SDXL conditioning 元数据：
             "width": original_width,
             "height": original_height,
             "crop_w": crop_x,
@@ -905,6 +986,10 @@ class ComfySDXLModelAdapter:
 
         batch_size = int(noisy_latent.shape[0])
 
+        # -------------------------------------------------------------
+        # 1. ChordEdit 原有 conditioning -> ComfyUI 节点 CONDITIONING。
+        #    不改变算法，仅适配 ComfyUI conditioning 格式。
+        # -------------------------------------------------------------
         raw_cond = self._pack_to_comfy_conditioning(
             conditioning=conditioning,
             batch_size=batch_size,
@@ -912,6 +997,9 @@ class ComfySDXLModelAdapter:
 
         converted_cond = _convert_comfy_conditioning(raw_cond)
 
+        # -------------------------------------------------------------
+        # 2. 使用 SDXL BaseModel.extra_conds() 生成 c_adm 等条件。
+        # -------------------------------------------------------------
         model_extra_conds = getattr(
             self.base_model,
             "extra_conds",
@@ -935,6 +1023,8 @@ class ComfySDXLModelAdapter:
             noisy_latent=noisy_latent,
         )
 
+        # model_options 必须来自 ModelPatcher。
+        # 它包含 LoRA、ControlNet、采样 hook 等 ComfyUI 运行时选项。
         model_options = getattr(
             self.model_patcher,
             "model_options",
@@ -946,6 +1036,15 @@ class ComfySDXLModelAdapter:
         else:
             model_options = {}
 
+        # -------------------------------------------------------------
+        # 3. 新版 ComfyUI 必须以 active BaseModel 调用。
+        #
+        # 不能传 ModelPatcher：
+        #   'ModelPatcher' object has no attribute 'current_patcher'
+        #
+        # 也不能传 current_patcher=None 的裸 BaseModel：
+        #   'NoneType' object has no attribute 'prepare_state'
+        # -------------------------------------------------------------
         active_model, should_unpatch = self._activate_base_model(
             device=noisy_latent.device,
         )
@@ -959,7 +1058,10 @@ class ComfySDXLModelAdapter:
                 model_options,
             )
         finally:
-
+            # 仅清理由本次 predict_x0() 手动激活的 patch。
+            #
+            # 关键：必须同时清除手动写入的 current_patcher，
+            # 否则下一个 predict_x0() 会错误地认为模型仍处于 patch 状态。
             if should_unpatch:
                 try:
                     offload_device = model_management.unet_offload_device()
@@ -1004,6 +1106,11 @@ class ComfySDXLModelAdapter:
             )
 
         return denoised
+
+
+# =========================================================================
+# ChordEdit 引擎
+# =========================================================================
 
 
 class ComfySDXLChordEditEngine:
@@ -1167,6 +1274,8 @@ class ComfySDXLChordEditEngine:
                     + sigma_prev_stack_view * noise_stack
             )
 
+            # 排列：
+            # source_s, target_s, source_prev, target_prev
             model_input = torch.cat(
                 [z_s, z_s, z_prev, z_prev],
                 dim=0,
@@ -1550,6 +1659,11 @@ class ComfySDXLChordEditEngine:
         return decoded, latent_output
 
 
+# =========================================================================
+# ComfyUI 节点
+# =========================================================================
+
+
 class SDXLChordEditNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1730,7 +1844,7 @@ class SDXLChordEditNode:
     RETURN_TYPES = ("IMAGE", "LATENT")
     RETURN_NAMES = ("image", "latent")
     FUNCTION = "run"
-    CATEGORY = "image/editing/ChordEdit"
+    CATEGORY = "XiaoXiao/ChordEdit"
 
     DESCRIPTION = (
         "使用 ComfyUI MODEL、CLIP、VAE 执行 SDXL ChordEdit。"
@@ -1855,7 +1969,7 @@ class SDXLChordEditReleaseCacheNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "release"
-    CATEGORY = "image/editing/ChordEdit"
+    CATEGORY = "XiaoXiao/ChordEdit"
 
     def release(self, image: torch.Tensor):
         gc.collect()
