@@ -7,6 +7,10 @@ from PIL import Image, PngImagePlugin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# ==========================================
+# 核心算法（保持第一版完全一致）
+# ==========================================
+
 def to_int32(val):
     val = int(val) & 0xFFFFFFFF
     if val >= 0x80000000:
@@ -108,6 +112,10 @@ def apply_obfuscation(img_tensor, password, is_decrypt):
     return out_tensor
 
 
+# ==========================================
+# 节点类
+# ==========================================
+
 class XiaoxiaoBaseNode:
     IS_DECRYPT = False
 
@@ -130,7 +138,7 @@ class XiaoxiaoBaseNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "process"
-    CATEGORY = "xiaoxiao/image"
+    CATEGORY = "XiaoXiao/image"
 
     def _clean_path(self, path):
         return path.strip().strip('"').strip("'") if path else ""
@@ -141,7 +149,9 @@ class XiaoxiaoBaseNode:
         pil_img = Image.fromarray(img_np)
 
         if keep_metadata and original_info:
-
+            print(
+                f"[Xiaoxiao] 尝试保留元数据: {filename} | 元数据键: {list(original_info.keys()) if original_info else 'None'}")
+            # 使用 PngInfo 更可靠地保留元数据
             png_info = PngImagePlugin.PngInfo()
             for key, value in original_info.items():
                 if isinstance(value, (str, bytes)):
@@ -152,7 +162,7 @@ class XiaoxiaoBaseNode:
             pil_img.save(os.path.join(folder, filename), format="PNG",
                          compress_level=1, pnginfo=png_info)
         else:
-
+            print(f"[Xiaoxiao] 已清除元数据: {filename}")
             pil_img.save(os.path.join(folder, filename), format="PNG", compress_level=1)
 
     def process(self, output_folder, password, strip_metadata, max_workers=4, max_preview=4, image=None,
@@ -210,7 +220,7 @@ class XiaoxiaoBaseNode:
                         result, fn = future.result()
                         if result is not None:
                             processed_list.append(result)
-
+                            print(f"[Xiaoxiao] ✓ 已保存: {fn}")
 
         except Exception as e:
             print(f"[Xiaoxiao] 严重错误: {e}")
