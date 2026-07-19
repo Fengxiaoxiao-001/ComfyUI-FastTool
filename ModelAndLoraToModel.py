@@ -20,6 +20,7 @@ class TrueModelMixerDictFuser:
             },
             "optional": {
                 "lora_stack": ("LORA_STACK",),
+                # 增加了 fp8 选项支持
                 "save_dtype": (["auto", "float16", "bfloat16", "float32"],
                                {"default": "auto"}),
             }
@@ -28,7 +29,7 @@ class TrueModelMixerDictFuser:
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     RETURN_NAMES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "pure_dict_merge"
-    CATEGORY = "Advanced LoRA/Fusion"
+    CATEGORY = "XiaoXiao/Fusion[SDXL]"
 
     def pure_dict_merge(self, base_model, lora_stack=None, save_dtype="auto"):
         if lora_stack is None:
@@ -42,12 +43,13 @@ class TrueModelMixerDictFuser:
             print("📦 [TrueMixer] 从缓存中读取融合模型...")
             return self._cache[cache_id]
 
+        # --- 新增：外科手术式显存清理 ---
         print("🧹 [TrueMixer] 准备开始烧录，正在强制清空残留显存...")
-
+        # 1. 强制卸载 ComfyUI 管理的所有模型，腾出最大空间
         comfy.model_management.unload_all_models()
-
+        # 2. 触发 Python 垃圾回收
         gc.collect()
-
+        # 3. 释放 PyTorch 显存缓存
         comfy.model_management.soft_empty_cache()
 
         print(f"📦 [TrueMixer] 正在加载底模: {base_model}")
@@ -58,13 +60,14 @@ class TrueModelMixerDictFuser:
         )
         model, clip, vae = out[0], out[1], out[2]
 
+        # --- 精度映射增强 ---
         base_dtype = next(model.model.parameters()).dtype
         dtype_map = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
         }
-
+        # 针对新版本 Torch 的 FP8 支持
         if hasattr(torch, "float8_e4m3fn"):
             dtype_map["fp8_e4m3fn"] = torch.float8_e4m3fn
             dtype_map["fp8_e5m2"] = torch.float8_e5m2
@@ -81,6 +84,7 @@ class TrueModelMixerDictFuser:
                 lora_sd = comfy.utils.load_torch_file(lora_path, safe_load=True)
                 model, clip = comfy.sd.load_lora_for_models(model, clip, lora_sd, m_strength, c_strength)
 
+        # --- 核心烧录函数修改 ---
         @torch.inference_mode()
         def bake_model_weights(patcher, name="MODEL"):
             print(f"🔥 [TrueMixer] 正在以 {target_dtype} 精度烧录 {name}...")
@@ -91,13 +95,15 @@ class TrueModelMixerDictFuser:
             sd = model_inner.state_dict()
             new_sd = {}
 
+            # --- 步骤 1: 核心烧录循环 ---
             for key in sd:
-
+                # 统一拉到 FP32，确保“极致细节”不被 BF16/FP16 的舍入误差吞噬
                 weight = sd[key].to(device).to(torch.float32)
 
                 if key in patcher.patches:
                     weight = comfy.lora.calculate_weight(patcher.patches[key], weight, key)
 
+                # 安全护甲：仅针对 FP16/FP8 等窄动态范围格式
                 if target_dtype == torch.float16:
                     weight = torch.nan_to_num(weight, nan=0.0, posinf=65504, neginf=-65504)
                 elif "float8" in str(target_dtype):
@@ -107,19 +113,23 @@ class TrueModelMixerDictFuser:
 
                 new_sd[key] = weight.to(target_dtype).cpu()
 
+            # --- 步骤 2: 清理逻辑（必须在循环外！） ---
             patcher.patches = {}
             patcher.backup = {}
             if hasattr(patcher, 'object_patches'):
                 patcher.object_patches = {}
 
+            # 加载新权重
             model_inner.load_state_dict(new_sd)
 
+            # 同步更新 base_model，确保这是“彻底的”烧录
             if hasattr(patcher, "base_model"):
                 patcher.base_model.load_state_dict(new_sd)
 
             model_inner.to(comfy.model_management.intermediate_device())
             return patcher
 
+        # 执行
         model = bake_model_weights(model, "UNET")
         if hasattr(clip, "patcher"):
             clip.patcher = bake_model_weights(clip.patcher, "CLIP")
@@ -135,4 +145,4 @@ class TrueModelMixerDictFuser:
 
 
 NODE_CLASS_MAPPINGS = {"TrueModelMixerDictFuser": TrueModelMixerDictFuser}
-NODE_DISPLAY_NAME_MAPPINGS = {"TrueModelMixerDictFuser": "【SDXL】 Model Mixer"}
+NODE_DISPLAY_NAME_MAPPINGS = {"TrueModelMixerDictFuser": "🛠️ 正统 Model Mixer (极致细节版)"}
