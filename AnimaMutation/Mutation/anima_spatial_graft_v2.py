@@ -1,6 +1,26 @@
 # coding=utf-8
 # Mutation/anima_spatial_graft_v2.py
-
+#
+# Anima Spatial Graft V2 / MUDD-Former runtime mutation.
+#
+# 该文件只包含 ComfyUI 推理所需内容：
+#
+#   1. MUDD-Former 新增模块；
+#   2. MUDD persistent memory 前向逻辑；
+#   3. 原版 Anima block/model forward 的原地安装；
+#   4. checkpoint / LoRA 架构检测；
+#   5. 根据 checkpoint 权重形状推断运行配置；
+#   6. 严格的 dtype/device 一致性检查。
+#
+# 原始 Anima 参数路径保持不变。
+#
+# 新增参数路径仅位于：
+#
+#     blocks.{index}.mudd_graft.*
+#
+# MUTATION_ID 必须与文件名去掉 .py 后完全一致。
+#
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -17,44 +37,78 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ============================================================
+# 配置
+# ============================================================
+
+
 @dataclass
 class MUDDGraftRuntimeConfig:
+    """
+    MUDD-Former 推理配置。
+
+    MUDD：
+
+        Multi-scale Unified Dynamic Dense-memory Former
+
+    默认值与训练架构 anima_grafted2.py 保持一致。
+
+    hidden override 字段只用于从 checkpoint 权重形状恢复架构，
+    不会产生额外参数。
+    """
+
     enabled: bool = True
 
+    # 每隔多少个原始 Transformer block 安装一个 MUDD 节点。
     block_stride: int = 4
 
+    # memory channel 相对于 model_channels 的比例。
     memory_ratio: float = 0.125
 
+    # 如果 checkpoint 可以推断出精确 channel，则优先使用该值。
     memory_channels_override: Optional[int] = None
 
+    # 低分辨率 memory 的空间池化倍数。
     memory_pool: int = 4
 
+    # MUDDMemoryUnit 数量。
     memory_depth: int = 2
 
+    # 是否启用全分辨率 detail 分支。
     use_detail_branch: bool = True
 
+    # detail channel 相对于 model_channels 的比例。
     detail_ratio: float = 0.0625
 
+    # 如果 checkpoint 可以推断出精确 channel，则优先使用该值。
     detail_channels_override: Optional[int] = None
 
     spatial_kernel_size: int = 3
     temporal_kernel_size: int = 1
 
+    # 推理时通常为 0。
     dropout: float = 0.0
 
     branch_scale_init: float = 1.0
     memory_layer_scale_init: float = 0.1
     detail_layer_scale_init: float = 0.1
 
+    # sigmoid(-1.5) ~= 0.182。
     memory_update_bias: float = -1.5
 
     use_framewise_timestep: bool = True
 
+    # 原训练架构默认使用 RMSNorm。
     use_rms_norm: bool = True
 
 
+# ============================================================
+# dtype / device 工具
+# ============================================================
+
+
 def _module_first_floating_parameter(
-        module: Optional[nn.Module],
+    module: Optional[nn.Module],
 ) -> Optional[nn.Parameter]:
     if module is None:
         return None
@@ -62,8 +116,8 @@ def _module_first_floating_parameter(
     try:
         for parameter in module.parameters():
             if (
-                    torch.is_tensor(parameter)
-                    and parameter.is_floating_point()
+                torch.is_tensor(parameter)
+                and parameter.is_floating_point()
             ):
                 return parameter
     except Exception:
@@ -73,8 +127,15 @@ def _module_first_floating_parameter(
 
 
 def _find_model_reference_parameter(
-        model: nn.Module,
+    model: nn.Module,
 ) -> Optional[nn.Parameter]:
+    """
+    查找新增 Mutation 模块应当跟随的 dtype/device。
+
+    优先使用 x_embedder，因为 latent 首先进入该模块，它的权重
+    通常最能代表 diffusion model 的真实计算精度。
+    """
+
     preferred_modules = (
         getattr(model, "x_embedder", None),
         getattr(model, "t_embedder", None),
@@ -92,8 +153,8 @@ def _find_model_reference_parameter(
     try:
         for parameter in model.parameters():
             if (
-                    torch.is_tensor(parameter)
-                    and parameter.is_floating_point()
+                torch.is_tensor(parameter)
+                and parameter.is_floating_point()
             ):
                 return parameter
     except Exception:
@@ -103,9 +164,9 @@ def _find_model_reference_parameter(
 
 
 def _require_same_device(
-        tensor: torch.Tensor,
-        expected_device: torch.device,
-        tensor_name: str,
+    tensor: torch.Tensor,
+    expected_device: torch.device,
+    tensor_name: str,
 ):
     if tensor.device != expected_device:
         raise RuntimeError(
@@ -118,13 +179,20 @@ def _require_same_device(
 
 
 def _cast_tensor(
-        tensor: torch.Tensor,
-        dtype: torch.dtype,
-        device: torch.device,
+    tensor: torch.Tensor,
+    dtype: torch.dtype,
+    device: torch.device,
 ) -> torch.Tensor:
+    """
+    将 Tensor 严格恢复到新增模块权重的 dtype/device。
+
+    本架构不允许 Norm、interpolate、标量运算或 residual add
+    把结果意外泄漏为 FP32。
+    """
+
     if (
-            tensor.device != device
-            or tensor.dtype != dtype
+        tensor.device != device
+        or tensor.dtype != dtype
     ):
         tensor = tensor.to(
             device=device,
@@ -135,8 +203,8 @@ def _cast_tensor(
 
 
 def _check_finite(
-        tensor: torch.Tensor,
-        tensor_name: str,
+    tensor: torch.Tensor,
+    tensor_name: str,
 ):
     if not tensor.is_floating_point():
         return
@@ -149,8 +217,8 @@ def _check_finite(
 
 
 def _validate_odd_kernel(
-        kernel_size: int,
-        name: str,
+    kernel_size: int,
+    name: str,
 ):
     kernel_size = int(kernel_size)
 
@@ -160,13 +228,23 @@ def _validate_odd_kernel(
         )
 
 
+# ============================================================
+# Normalization
+# ============================================================
+
+
 class SimpleRMSNorm(nn.Module):
+    """
+    与训练架构兼容的无 affine RMSNorm。
+
+    内部使用 FP32 计算 RMS，输出前恢复输入 dtype。
+    """
 
     def __init__(
-            self,
-            dim: int,
-            eps: float = 1e-6,
-            elementwise_affine: bool = False,
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        elementwise_affine: bool = False,
     ):
         super().__init__()
 
@@ -187,8 +265,8 @@ class SimpleRMSNorm(nn.Module):
             )
 
     def forward(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         input_dtype = x.dtype
         input_device = x.device
@@ -203,7 +281,7 @@ class SimpleRMSNorm(nn.Module):
         )
 
         output = (
-                x_float * inverse_rms
+            x_float * inverse_rms
         ).to(
             device=input_device,
             dtype=input_dtype,
@@ -224,12 +302,17 @@ class SimpleRMSNorm(nn.Module):
 
 
 class ChannelNorm3d(nn.Module):
+    """
+    对 B,C,T,H,W Tensor 的 channel 维执行归一化。
+
+    归一化实际在最后一个维度进行，避免使用空间统计。
+    """
 
     def __init__(
-            self,
-            channels: int,
-            eps: float = 1e-6,
-            use_rms_norm: bool = True,
+        self,
+        channels: int,
+        eps: float = 1e-6,
+        use_rms_norm: bool = True,
     ):
         super().__init__()
 
@@ -249,8 +332,8 @@ class ChannelNorm3d(nn.Module):
             )
 
     def forward(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         input_dtype = x.dtype
         input_device = x.device
@@ -279,16 +362,31 @@ class ChannelNorm3d(nn.Module):
         ).contiguous()
 
 
+# ============================================================
+# MUDD 低成本处理单元
+# ============================================================
+
+
 class MUDDMemoryUnit(nn.Module):
+    """
+    低分辨率时空 memory residual unit。
+
+    参数路径与训练架构保持一致：
+
+        memory_units.{index}.depthwise.weight
+        memory_units.{index}.pointwise_in.weight
+        memory_units.{index}.pointwise_out.weight
+        memory_units.{index}.layer_scale
+    """
 
     def __init__(
-            self,
-            channels: int,
-            spatial_kernel_size: int = 3,
-            temporal_kernel_size: int = 1,
-            dropout: float = 0.0,
-            layer_scale_init: float = 0.1,
-            use_rms_norm: bool = True,
+        self,
+        channels: int,
+        spatial_kernel_size: int = 3,
+        temporal_kernel_size: int = 1,
+        dropout: float = 0.0,
+        layer_scale_init: float = 0.1,
+        use_rms_norm: bool = True,
     ):
         super().__init__()
 
@@ -368,8 +466,8 @@ class MUDDMemoryUnit(nn.Module):
         )
 
     def forward(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         compute_dtype = self.depthwise.weight.dtype
         compute_device = self.depthwise.weight.device
@@ -429,14 +527,23 @@ class MUDDMemoryUnit(nn.Module):
 
 
 class MUDDDetailUnit(nn.Module):
+    """
+    全分辨率局部细节分支。
+
+    参数路径与训练架构保持一致：
+
+        detail_unit.depthwise.weight
+        detail_unit.pointwise.weight
+        detail_unit.layer_scale
+    """
 
     def __init__(
-            self,
-            channels: int,
-            spatial_kernel_size: int = 3,
-            dropout: float = 0.0,
-            layer_scale_init: float = 0.1,
-            use_rms_norm: bool = True,
+        self,
+        channels: int,
+        spatial_kernel_size: int = 3,
+        dropout: float = 0.0,
+        layer_scale_init: float = 0.1,
+        use_rms_norm: bool = True,
     ):
         super().__init__()
 
@@ -504,8 +611,8 @@ class MUDDDetailUnit(nn.Module):
         )
 
     def forward(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         compute_dtype = self.depthwise.weight.dtype
         compute_device = self.depthwise.weight.device
@@ -563,13 +670,43 @@ class MUDDDetailUnit(nn.Module):
         )
 
 
+# ============================================================
+# MUDD-Former Graft
+# ============================================================
+
+
 class MUDDFormerGraft(nn.Module):
+    """
+    Anima MUDD-Former runtime graft。
+
+    输入：
+
+        x_B_T_H_W_D:
+            当前深层 Transformer 特征。
+
+        shallow_B_T_H_W_D:
+            第一个 Transformer block 之前的浅层特征。
+
+        previous_memory:
+            上一个 MUDD 节点产生的低分辨率 persistent memory。
+
+        timestep_embedding_B_T_D:
+            Anima timestep embedding。
+
+    输出：
+
+        output:
+            注入 MUDD residual 后的 Transformer 特征。
+
+        updated_memory:
+            传给下一个 MUDD 节点的 persistent memory。
+    """
 
     def __init__(
-            self,
-            model_channels: int,
-            config: MUDDGraftRuntimeConfig,
-            block_index: int,
+        self,
+        model_channels: int,
+        config: MUDDGraftRuntimeConfig,
+        block_index: int,
     ):
         super().__init__()
 
@@ -586,8 +723,8 @@ class MUDDFormerGraft(nn.Module):
         )
 
         if (
-                config.memory_channels_override
-                is not None
+            config.memory_channels_override
+            is not None
         ):
             memory_channels = int(
                 config.memory_channels_override
@@ -620,8 +757,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
         if (
-                config.detail_channels_override
-                is not None
+            config.detail_channels_override
+            is not None
         ):
             detail_channels = int(
                 config.detail_channels_override
@@ -706,6 +843,7 @@ class MUDDFormerGraft(nn.Module):
                 elementwise_affine=False,
             )
 
+        # 当前深层特征 -> memory space。
         self.current_memory_proj = nn.Conv3d(
             self.model_channels,
             self.memory_channels,
@@ -713,6 +851,7 @@ class MUDDFormerGraft(nn.Module):
             bias=False,
         )
 
+        # 初始浅层特征 -> memory space。
         self.shallow_memory_proj = nn.Conv3d(
             self.model_channels,
             self.memory_channels,
@@ -720,6 +859,7 @@ class MUDDFormerGraft(nn.Module):
             bias=False,
         )
 
+        # current + shallow + previous memory。
         self.memory_merge = nn.Conv3d(
             self.memory_channels * 3,
             self.memory_channels,
@@ -746,11 +886,16 @@ class MUDDFormerGraft(nn.Module):
                     ),
                 )
                 for _ in range(
-                int(config.memory_depth)
-            )
+                    int(config.memory_depth)
+                )
             ]
         )
 
+        # 输出三个 memory-width 调制值：
+        #
+        #   1. update logits；
+        #   2. output gate；
+        #   3. shallow gate。
         self.time_modulation = nn.Sequential(
             nn.SiLU(),
 
@@ -875,10 +1020,10 @@ class MUDDFormerGraft(nn.Module):
             self.time_modulation[1].weight,
             mean=0.0,
             std=(
-                    1.0
-                    / math.sqrt(
-                self.model_channels
-            )
+                1.0
+                / math.sqrt(
+                    self.model_channels
+                )
             ),
         )
 
@@ -895,6 +1040,7 @@ class MUDDFormerGraft(nn.Module):
                 self.memory_channels
             )
 
+            # memory update gate。
             self.time_modulation[3].bias[
                 :memory_channels
             ].fill_(
@@ -903,22 +1049,25 @@ class MUDDFormerGraft(nn.Module):
                 )
             )
 
+            # output gate。
             self.time_modulation[3].bias[
                 memory_channels:
                 2 * memory_channels
             ].zero_()
 
+            # shallow memory gate。
             self.time_modulation[3].bias[
                 2 * memory_channels:
             ].zero_()
 
+        # 未加载 Mutation 权重时保持原模型函数不变。
         nn.init.zeros_(
             self.output_proj.weight
         )
 
     def _pool_memory(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         pool = int(
             self.config.memory_pool
@@ -953,13 +1102,13 @@ class MUDDFormerGraft(nn.Module):
         )
 
     def _prepare_timestep(
-            self,
-            timestep_embedding: torch.Tensor,
-            batch_size: int,
-            num_frames: int,
+        self,
+        timestep_embedding: torch.Tensor,
+        batch_size: int,
+        num_frames: int,
     ) -> torch.Tensor:
         if not torch.is_tensor(
-                timestep_embedding
+            timestep_embedding
         ):
             raise TypeError(
                 "MUDD timestep embedding 必须是 Tensor"
@@ -972,8 +1121,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
         if (
-                timestep_embedding.shape[0]
-                != batch_size
+            timestep_embedding.shape[0]
+            != batch_size
         ):
             raise ValueError(
                 "MUDD timestep batch 与特征 batch 不一致："
@@ -982,8 +1131,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
         if (
-                timestep_embedding.shape[-1]
-                != self.model_channels
+            timestep_embedding.shape[-1]
+            != self.model_channels
         ):
             raise ValueError(
                 "MUDD timestep channel 与 model_channels "
@@ -998,8 +1147,8 @@ class MUDDFormerGraft(nn.Module):
 
         if self.config.use_framewise_timestep:
             if (
-                    timestep_frames == 1
-                    and num_frames > 1
+                timestep_frames == 1
+                and num_frames > 1
             ):
                 timestep_embedding = (
                     timestep_embedding.expand(
@@ -1029,8 +1178,8 @@ class MUDDFormerGraft(nn.Module):
         return timestep_embedding.contiguous()
 
     def _run_memory_units(
-            self,
-            x: torch.Tensor,
+        self,
+        x: torch.Tensor,
     ) -> torch.Tensor:
         for unit in self.memory_units:
             x = unit(x)
@@ -1038,21 +1187,21 @@ class MUDDFormerGraft(nn.Module):
         return x
 
     def forward(
-            self,
-            x_B_T_H_W_D: torch.Tensor,
-            shallow_B_T_H_W_D: torch.Tensor,
-            previous_memory: Optional[torch.Tensor],
-            timestep_embedding_B_T_D: torch.Tensor,
+        self,
+        x_B_T_H_W_D: torch.Tensor,
+        shallow_B_T_H_W_D: torch.Tensor,
+        previous_memory: Optional[torch.Tensor],
+        timestep_embedding_B_T_D: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not torch.is_tensor(
-                x_B_T_H_W_D
+            x_B_T_H_W_D
         ):
             raise TypeError(
                 "MUDD 当前特征必须是 Tensor"
             )
 
         if not torch.is_tensor(
-                shallow_B_T_H_W_D
+            shallow_B_T_H_W_D
         ):
             raise TypeError(
                 "MUDD shallow feature 必须是 Tensor"
@@ -1071,8 +1220,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
         if (
-                shallow_B_T_H_W_D.shape
-                != x_B_T_H_W_D.shape
+            shallow_B_T_H_W_D.shape
+            != x_B_T_H_W_D.shape
         ):
             raise ValueError(
                 "MUDD shallow feature 与当前特征形状不一致："
@@ -1106,6 +1255,7 @@ class MUDDFormerGraft(nn.Module):
             "MUDD timestep embedding",
         )
 
+        # 所有 residual 和输入严格对齐到 graft 权重 dtype。
         x_B_T_H_W_D = _cast_tensor(
             x_B_T_H_W_D,
             dtype=compute_dtype,
@@ -1221,7 +1371,7 @@ class MUDDFormerGraft(nn.Module):
             previous_memory = shallow_memory
         else:
             if not torch.is_tensor(
-                    previous_memory
+                previous_memory
             ):
                 raise TypeError(
                     "MUDD previous_memory 必须是 Tensor 或 None"
@@ -1235,8 +1385,8 @@ class MUDDFormerGraft(nn.Module):
                 )
 
             if (
-                    previous_memory.shape[0]
-                    != batch_size
+                previous_memory.shape[0]
+                != batch_size
             ):
                 raise ValueError(
                     "MUDD previous_memory batch 不一致："
@@ -1245,8 +1395,8 @@ class MUDDFormerGraft(nn.Module):
                 )
 
             if (
-                    previous_memory.shape[1]
-                    != self.memory_channels
+                previous_memory.shape[1]
+                != self.memory_channels
             ):
                 raise ValueError(
                     "MUDD previous_memory channel 不一致："
@@ -1261,8 +1411,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
             if (
-                    previous_memory.shape[-3:]
-                    != current_memory.shape[-3:]
+                previous_memory.shape[-3:]
+                != current_memory.shape[-3:]
             ):
                 previous_memory = F.interpolate(
                     previous_memory,
@@ -1311,6 +1461,7 @@ class MUDDFormerGraft(nn.Module):
             dim=-1,
         )
 
+        # B,T,C -> B,C,T,1,1
         update_logits = update_logits.permute(
             0,
             2,
@@ -1382,17 +1533,17 @@ class MUDDFormerGraft(nn.Module):
         )
 
         output_strength = (
-                one
-                + half * torch.tanh(
-            output_gate
-        )
+            one
+            + half * torch.tanh(
+                output_gate
+            )
         )
 
         shallow_strength = (
-                one
-                + half * torch.tanh(
-            shallow_gate
-        )
+            one
+            + half * torch.tanh(
+                shallow_gate
+            )
         )
 
         memory_update_strength = _cast_tensor(
@@ -1446,12 +1597,12 @@ class MUDDFormerGraft(nn.Module):
         )
 
         updated_memory = (
-                previous_memory
-                + memory_update_strength
-                * (
-                        memory_candidate
-                        - previous_memory
-                )
+            previous_memory
+            + memory_update_strength
+            * (
+                memory_candidate
+                - previous_memory
+            )
         )
 
         updated_memory = _cast_tensor(
@@ -1503,7 +1654,7 @@ class MUDDFormerGraft(nn.Module):
             )
 
             restored_memory = (
-                    restored_memory + detail
+                restored_memory + detail
             )
 
             restored_memory = _cast_tensor(
@@ -1513,8 +1664,8 @@ class MUDDFormerGraft(nn.Module):
             )
 
         output_feature = (
-                restored_memory
-                * output_strength
+            restored_memory
+            * output_strength
         )
 
         output_feature = _cast_tensor(
@@ -1547,11 +1698,12 @@ class MUDDFormerGraft(nn.Module):
         )
 
         output = (
-                residual
-                + branch_scale
-                * output_feature
+            residual
+            + branch_scale
+            * output_feature
         )
 
+        # 最终输出严格保持 graft 权重 dtype。
         output = _cast_tensor(
             output,
             dtype=compute_dtype,
@@ -1577,11 +1729,24 @@ class MUDDFormerGraft(nn.Module):
         return output, updated_memory
 
 
+# ============================================================
+# 默认索引生成
+# ============================================================
+
+
 def build_every_n_block_indices(
-        num_blocks: int,
-        stride: int = 4,
-        include_last_partial: bool = False,
+    num_blocks: int,
+    stride: int = 4,
+    include_last_partial: bool = False,
 ) -> List[int]:
+    """
+    stride=4 时返回：
+
+        [3, 7, 11, 15, ...]
+
+    表示每完成四个原始 Transformer blocks 后运行一次 MUDD。
+    """
+
     num_blocks = int(num_blocks)
     stride = int(stride)
 
@@ -1602,8 +1767,8 @@ def build_every_n_block_indices(
     )
 
     if (
-            include_last_partial
-            and num_blocks - 1 not in indices
+        include_last_partial
+        and num_blocks - 1 not in indices
     ):
         indices.append(
             num_blocks - 1
@@ -1614,8 +1779,13 @@ def build_every_n_block_indices(
     )
 
 
+# ============================================================
+# Runtime context / Forward 安装
+# ============================================================
+
+
 def _get_or_create_runtime_context(
-        model: nn.Module,
+    model: nn.Module,
 ) -> Dict[str, Optional[torch.Tensor]]:
     context = getattr(
         model,
@@ -1639,22 +1809,29 @@ def _get_or_create_runtime_context(
 
 
 def _extract_primary_tensor(
-        output,
+    output,
 ) -> Tuple[torch.Tensor, Optional[str]]:
+    """
+    正常 Anima block 直接返回 Tensor。
+
+    为兼容少量修改版运行时，也支持 tuple/list 的第一个元素为
+    hidden_states Tensor。
+    """
+
     if torch.is_tensor(output):
         return output, None
 
     if (
-            isinstance(output, tuple)
-            and len(output) > 0
-            and torch.is_tensor(output[0])
+        isinstance(output, tuple)
+        and len(output) > 0
+        and torch.is_tensor(output[0])
     ):
         return output[0], "tuple"
 
     if (
-            isinstance(output, list)
-            and len(output) > 0
-            and torch.is_tensor(output[0])
+        isinstance(output, list)
+        and len(output) > 0
+        and torch.is_tensor(output[0])
     ):
         return output[0], "list"
 
@@ -1666,9 +1843,9 @@ def _extract_primary_tensor(
 
 
 def _replace_primary_tensor(
-        original_output,
-        new_tensor: torch.Tensor,
-        container_type: Optional[str],
+    original_output,
+    new_tensor: torch.Tensor,
+    container_type: Optional[str],
 ):
     if container_type is None:
         return new_tensor
@@ -1694,15 +1871,22 @@ def _replace_primary_tensor(
 
 
 def _install_mudd_block_forward(
-        block: nn.Module,
-        model: nn.Module,
-        block_index: int,
-        apply_mudd: bool,
+    block: nn.Module,
+    model: nn.Module,
+    block_index: int,
+    apply_mudd: bool,
 ):
+    """
+    原地修改 block.forward。
+
+    Block 0 负责记录原始 patch-embedded shallow feature。
+    被选中的 blocks 在原始 forward 后运行 mudd_graft。
+    """
+
     if getattr(
-            block,
-            "_mudd_graft_forward_installed",
-            False,
+        block,
+        "_mudd_graft_forward_installed",
+        False,
     ):
         existing_apply = bool(
             getattr(
@@ -1722,8 +1906,8 @@ def _install_mudd_block_forward(
         return
 
     if apply_mudd and not hasattr(
-            block,
-            "mudd_graft",
+        block,
+        "mudd_graft",
     ):
         raise RuntimeError(
             f"Block {block_index} 尚未添加 mudd_graft，"
@@ -1757,11 +1941,11 @@ def _install_mudd_block_forward(
     )
 
     def mudd_grafted_forward(
-            self,
-            x_B_T_H_W_D: torch.Tensor,
-            emb_B_T_D: torch.Tensor,
-            *args,
-            **kwargs,
+        self,
+        x_B_T_H_W_D: torch.Tensor,
+        emb_B_T_D: torch.Tensor,
+        *args,
+        **kwargs,
     ):
         owner_reference = getattr(
             self,
@@ -1793,9 +1977,10 @@ def _install_mudd_block_forward(
             )
         )
 
+        # 每次完整前向进入 block 0 时，重置 persistent memory。
         if runtime_block_index == 0:
             if not torch.is_tensor(
-                    x_B_T_H_W_D
+                x_B_T_H_W_D
             ):
                 raise TypeError(
                     "[SpatialGraftV2/MUDD] Block 0 输入不是 Tensor"
@@ -1876,24 +2061,31 @@ def _install_mudd_block_forward(
 
 
 def _install_model_runtime_context_forward(
-        model: nn.Module,
+    model: nn.Module,
 ):
+    """
+    包装 forward_mini_train_dit，只负责创建和清理 MUDD context。
+
+    原始 Anima 顶层执行逻辑不被复制，因而能够兼容 ComfyUI 中
+    不同版本的 Anima attention 参数、LLM adapter 和 block swap。
+    """
+
     if getattr(
-            model,
-            "_mudd_model_forward_installed",
-            False,
+        model,
+        "_mudd_model_forward_installed",
+        False,
     ):
         return
 
     if hasattr(
-            model,
-            "forward_mini_train_dit",
+        model,
+        "forward_mini_train_dit",
     ):
         forward_name = (
             "forward_mini_train_dit"
         )
     elif hasattr(model, "forward"):
-
+        # 理论上的兼容 fallback。
         forward_name = "forward"
     else:
         raise AttributeError(
@@ -1921,9 +2113,9 @@ def _install_model_runtime_context_forward(
     sentinel = object()
 
     def mudd_model_forward(
-            self,
-            *args,
-            **kwargs,
+        self,
+        *args,
+        **kwargs,
     ):
         previous_context = getattr(
             self,
@@ -1979,7 +2171,20 @@ def _install_model_runtime_context_forward(
     )
 
 
+# ============================================================
+# Mutation 主类
+# ============================================================
+
+
 class GraftedAnima:
+    """
+    AnimaBaker Mutation 系统入口。
+
+    注意：
+
+    该类不是新的 nn.Module 模型，而是运行时架构识别器和安装器。
+    """
+
     MUTATION_API_VERSION = 1
 
     MUTATION_ID = (
@@ -1990,6 +2195,9 @@ class GraftedAnima:
         "Anima MUDD Spatial Memory Graft V2"
     )
 
+    # 必须保持为 mudd_graft，才能加载训练架构中的参数：
+    #
+    #     blocks.{index}.mudd_graft.*
     MODULE_NAMESPACE = "mudd_graft"
 
     DEFAULT_CONFIG = MUDDGraftRuntimeConfig(
@@ -2015,9 +2223,12 @@ class GraftedAnima:
 
     @classmethod
     def detect(
-            cls,
-            state_dict_keys,
+        cls,
+        state_dict_keys,
     ) -> int:
+        """
+        根据基础模型或 LoRA 参数键判断是否属于本架构。
+        """
 
         score = 0
 
@@ -2039,7 +2250,7 @@ class GraftedAnima:
                 )
 
             elif key_lower.startswith(
-                    "mudd_graft."
+                "mudd_graft."
             ):
                 score = max(
                     score,
@@ -2064,10 +2275,10 @@ class GraftedAnima:
                     92,
                 )
 
-
+            # 使用多个专有子模块组合进一步识别。
             elif (
-                    "current_memory_proj" in key_lower
-                    and "memory_merge" in key_lower
+                "current_memory_proj" in key_lower
+                and "memory_merge" in key_lower
             ):
                 score = max(
                     score,
@@ -2078,40 +2289,48 @@ class GraftedAnima:
 
     @classmethod
     def is_mutation_key(
-            cls,
-            key,
+        cls,
+        key,
     ) -> bool:
+        """
+        判断某个参数是否属于 V2 新增层。
+        """
 
         key_lower = str(
             key
         ).lower()
 
         return (
-                ".mudd_graft." in key_lower
-                or key_lower.startswith(
-            "mudd_graft."
-        )
-                or "_mudd_graft_" in key_lower
-                or "mudd_graft." in key_lower
-                or "mudd_graft_" in key_lower
-                or cls.MUTATION_ID in key_lower
+            ".mudd_graft." in key_lower
+            or key_lower.startswith(
+                "mudd_graft."
+            )
+            or "_mudd_graft_" in key_lower
+            or "mudd_graft." in key_lower
+            or "mudd_graft_" in key_lower
+            or cls.MUTATION_ID in key_lower
         )
 
     @classmethod
     def _infer_indices_from_keys(
-            cls,
-            source_keys,
+        cls,
+        source_keys,
     ) -> List[int]:
         indices = set()
 
         patterns = (
-
+            # 原生 PyTorch：
+            #
+            # diffusion_model.blocks.3.mudd_graft.output_proj.weight
             re.compile(
                 r"(?:^|\.)blocks\.(\d+)"
                 r"\.mudd_graft(?:\.|$)",
                 re.IGNORECASE,
             ),
 
+            # 常见 LoRA 下划线路径：
+            #
+            # lora_unet_blocks_3_mudd_graft_output_proj
             re.compile(
                 r"(?:^|_)blocks_(\d+)"
                 r"_mudd_graft(?:_|$)",
@@ -2140,12 +2359,17 @@ class GraftedAnima:
 
     @classmethod
     def _infer_config_from_state_dict(
-            cls,
-            source_state_dict: Optional[
-                Dict[str, torch.Tensor]
-            ],
-            model_channels: int,
+        cls,
+        source_state_dict: Optional[
+            Dict[str, torch.Tensor]
+        ],
+        model_channels: int,
     ) -> MUDDGraftRuntimeConfig:
+        """
+        从完整 Mutation checkpoint 的权重形状恢复架构。
+
+        无法由权重推断的 memory_pool、Norm 类型等字段保持默认值。
+        """
 
         config = copy.deepcopy(
             cls.DEFAULT_CONFIG
@@ -2227,7 +2451,7 @@ class GraftedAnima:
         )
 
         for key, tensor in (
-                source_state_dict.items()
+            source_state_dict.items()
         ):
             if not torch.is_tensor(tensor):
                 continue
@@ -2235,7 +2459,7 @@ class GraftedAnima:
             key_string = str(key)
 
             if current_memory_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2260,7 +2484,7 @@ class GraftedAnima:
                 saw_core_base_weight = True
 
             elif shallow_memory_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2285,7 +2509,7 @@ class GraftedAnima:
                 saw_core_base_weight = True
 
             elif memory_merge_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2317,7 +2541,7 @@ class GraftedAnima:
                 saw_core_base_weight = True
 
             elif output_proj_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2408,7 +2632,7 @@ class GraftedAnima:
                 saw_any_memory_unit_weight = True
 
             if detail_in_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2433,7 +2657,7 @@ class GraftedAnima:
                 saw_detail_base_weight = True
 
             if detail_depthwise_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2483,7 +2707,7 @@ class GraftedAnima:
                 saw_detail_base_weight = True
 
             if detail_to_memory_pattern.search(
-                    key_string
+                key_string
             ):
                 if tensor.ndim != 5:
                     raise RuntimeError(
@@ -2520,8 +2744,8 @@ class GraftedAnima:
             )
 
             config.memory_ratio = (
-                    float(memory_channel)
-                    / float(model_channels)
+                float(memory_channel)
+                / float(model_channels)
             )
 
         if len(detail_channels) > 1:
@@ -2541,24 +2765,26 @@ class GraftedAnima:
             )
 
             config.detail_ratio = (
-                    float(detail_channel)
-                    / float(model_channels)
+                float(detail_channel)
+                / float(model_channels)
             )
 
             config.use_detail_branch = True
         elif saw_core_base_weight:
-
+            # 当 source_state_dict 明确包含完整 core base weight，
+            # 但完全没有 detail base weight 时，可推断训练时关闭了
+            # detail branch。
             config.use_detail_branch = bool(
                 saw_detail_base_weight
             )
 
         if memory_unit_indices:
             config.memory_depth = (
-                    max(memory_unit_indices) + 1
+                max(memory_unit_indices) + 1
             )
         elif (
-                saw_core_base_weight
-                and not saw_any_memory_unit_weight
+            saw_core_base_weight
+            and not saw_any_memory_unit_weight
         ):
             config.memory_depth = 0
 
@@ -2590,15 +2816,25 @@ class GraftedAnima:
 
     @classmethod
     def install(
-            cls,
-            model: nn.Module,
-            source_keys: Optional[
-                Sequence[str]
-            ] = None,
-            source_state_dict: Optional[
-                Dict[str, torch.Tensor]
-            ] = None,
+        cls,
+        model: nn.Module,
+        source_keys: Optional[
+            Sequence[str]
+        ] = None,
+        source_state_dict: Optional[
+            Dict[str, torch.Tensor]
+        ] = None,
     ) -> nn.Module:
+        """
+        原地安装 MUDD-Former V2。
+
+        source_keys:
+            可来自基础模型或 LoRA，用于推断安装 block。
+
+        source_state_dict:
+            如果调用方能够提供完整参数字典，可进一步推断
+            memory_channels、detail_channels、memory_depth 和 kernel。
+        """
 
         existing_mutation_id = getattr(
             model,
@@ -2608,8 +2844,8 @@ class GraftedAnima:
 
         if existing_mutation_id is not None:
             if (
-                    existing_mutation_id
-                    == cls.MUTATION_ID
+                existing_mutation_id
+                == cls.MUTATION_ID
             ):
                 return model
 
@@ -2625,8 +2861,8 @@ class GraftedAnima:
             )
 
         if not hasattr(
-                model,
-                "model_channels",
+            model,
+            "model_channels",
         ):
             raise AttributeError(
                 "Anima diffusion_model 不存在 "
@@ -2695,12 +2931,12 @@ class GraftedAnima:
         )
 
         for block_index in sorted(
-                selected_indices
+            selected_indices
         ):
             if not (
-                    0
-                    <= block_index
-                    < num_blocks
+                0
+                <= block_index
+                < num_blocks
             ):
                 raise ValueError(
                     "无效的 MUDD block index："
@@ -2713,8 +2949,8 @@ class GraftedAnima:
             ]
 
             if hasattr(
-                    block,
-                    cls.MODULE_NAMESPACE,
+                block,
+                cls.MODULE_NAMESPACE,
             ):
                 graft = getattr(
                     block,
@@ -2722,8 +2958,8 @@ class GraftedAnima:
                 )
 
                 if not isinstance(
-                        graft,
-                        MUDDFormerGraft,
+                    graft,
+                    MUDDFormerGraft,
                 ):
                     raise TypeError(
                         f"Block {block_index} 已存在不兼容的 "
@@ -2749,10 +2985,12 @@ class GraftedAnima:
                     )
 
                     if (
-                            reference_device.type
-                            == "meta"
+                        reference_device.type
+                        == "meta"
                     ):
-
+                        # 避免将新建实体参数直接转成 meta 后无法通过
+                        # 常规 .to() 恢复。这里只同步 dtype，后续交给
+                        # ComfyUI model patcher 调度设备。
                         graft.to(
                             dtype=reference_dtype
                         )
@@ -2767,6 +3005,8 @@ class GraftedAnima:
                     graft,
                 )
 
+        # Block 0 即使不是 MUDD block，也必须捕获初始 shallow
+        # feature。其原始参数路径不会发生变化。
         blocks_to_wrap = set(
             selected_indices
         )
@@ -2774,7 +3014,7 @@ class GraftedAnima:
         blocks_to_wrap.add(0)
 
         for block_index in sorted(
-                blocks_to_wrap
+            blocks_to_wrap
         ):
             block = model.blocks[
                 block_index
@@ -2785,8 +3025,8 @@ class GraftedAnima:
                 model=model,
                 block_index=block_index,
                 apply_mudd=(
-                        block_index
-                        in selected_indices
+                    block_index
+                    in selected_indices
                 ),
             )
 
@@ -2806,6 +3046,7 @@ class GraftedAnima:
             sorted(selected_indices),
         )
 
+        # 同时提供较通用的 graft 属性，方便外部工具查询。
         object.__setattr__(
             model,
             "graft_config",
