@@ -1,6 +1,32 @@
 # coding=utf-8
 # Mutation/anima_spatial_graft_v1.py
-
+#
+# Anima Spatial Graft V1 runtime mutation.
+# 仅包含 ComfyUI 推理所需架构和前向逻辑。
+#
+# Mutation 文件规范：
+#
+# 1. 文件名必须使用：
+#       小写蛇形命名_v版本号.py
+#
+#    例如：
+#       anima_spatial_graft_v1.py
+#
+# 2. 必须包含主类：
+#       GraftedAnima
+#
+# 3. GraftedAnima 必须包含：
+#       MUTATION_API_VERSION
+#       MUTATION_ID
+#       DISPLAY_NAME
+#       MODULE_NAMESPACE
+#       detect()
+#       is_mutation_key()
+#       install()
+#
+# 4. MUTATION_ID 必须与文件名去掉 .py 后完全一致。
+#
+# SPDX-License-Identifier: Apache-2.0
 
 import copy
 import math
@@ -14,7 +40,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
+# ============================================================
+# 配置
+# ============================================================
 
 @dataclass
 class SpatialGraftConfig:
@@ -35,7 +63,9 @@ class SpatialGraftConfig:
     use_rms_norm: bool = False
 
 
-
+# ============================================================
+# dtype/device 工具
+# ============================================================
 
 def _module_first_floating_parameter(
         module: Optional[nn.Module],
@@ -118,10 +148,17 @@ def _check_finite(
         )
 
 
-
+# ============================================================
+# 推理模块
+# ============================================================
 
 class ChannelLayerNorm2d(nn.Module):
+    """
+    对 NCHW Tensor 的 channel 维执行 LayerNorm。
 
+    为避免 FP16 LayerNorm 数值不稳定，内部以 FP32 计算，
+    但返回前一定转换回输入 dtype，不允许 FP32 泄漏到后续卷积。
+    """
 
     def __init__(
             self,
@@ -165,7 +202,11 @@ class ChannelLayerNorm2d(nn.Module):
 
 
 class SimpleRMSNorm(nn.Module):
+    """
+    不依赖训练项目中原始 RMSNorm 的独立推理实现。
 
+    内部使用 FP32 计算 RMS，但输出恢复到输入 dtype。
+    """
 
     def __init__(
             self,
@@ -292,6 +333,8 @@ class DepthwiseSpatialUnit(nn.Module):
             "DepthwiseSpatialUnit 输入",
         )
 
+        # 模块权重 dtype 是本模块唯一允许的运行 dtype。
+        # 即使上游意外输出 FP32，也先恢复为模型权重 dtype。
         x = _cast_tensor(
             x,
             dtype=compute_dtype,
@@ -303,7 +346,7 @@ class DepthwiseSpatialUnit(nn.Module):
         branch = self.depthwise(x)
         branch = self.norm(branch)
 
-
+        # norm 内部可能使用 FP32，但这里再次强制恢复。
         branch = _cast_tensor(
             branch,
             dtype=compute_dtype,
@@ -333,7 +376,7 @@ class DepthwiseSpatialUnit(nn.Module):
 
         result = residual + scale * branch
 
-
+        # 防止 residual + branch 发生隐式精度提升。
         result = _cast_tensor(
             result,
             dtype=compute_dtype,
@@ -543,7 +586,7 @@ class LightweightSpatialGraft(nn.Module):
                 a=math.sqrt(5),
             )
 
-
+        # 未加载变体权重时保持原模型函数不变。
         nn.init.zeros_(
             self.out_proj.weight
         )
@@ -711,7 +754,9 @@ class LightweightSpatialGraft(nn.Module):
             "Spatial graft timestep embedding",
         )
 
-
+        # 关键修复：
+        # residual、特征、时间嵌入全部统一到 graft 权重 dtype。
+        # 不保留可能已经被提升成 FP32 的 residual。
         x_B_T_H_W_D = _cast_tensor(
             x_B_T_H_W_D,
             dtype=compute_dtype,
@@ -966,7 +1011,8 @@ class LightweightSpatialGraft(nn.Module):
                 * x
         )
 
-
+        # 关键修复：
+        # 最终输出必须严格保持模型权重 dtype。
         result = _cast_tensor(
             result,
             dtype=compute_dtype,
@@ -976,7 +1022,9 @@ class LightweightSpatialGraft(nn.Module):
         return result
 
 
-
+# ============================================================
+# 索引生成
+# ============================================================
 
 def build_front_dense_back_sparse_indices(
         num_blocks: int,
@@ -1072,7 +1120,9 @@ def build_front_dense_back_sparse_indices(
     return indices
 
 
-
+# ============================================================
+# Block 前向安装
+# ============================================================
 
 def _install_grafted_block_forward(
         block: nn.Module,
@@ -1140,10 +1190,16 @@ def _install_grafted_block_forward(
     )
 
 
-
+# ============================================================
+# Mutation 主类
+# ============================================================
 
 class GraftedAnima:
+    """
+    AnimaBaker Mutation 系统主类。
 
+    它不是训练模型，而是运行时架构识别器和安装器。
+    """
 
     MUTATION_API_VERSION = 1
 
@@ -1452,7 +1508,9 @@ class GraftedAnima:
 
         reference_parameter = None
 
-
+        # 优先与 x_embedder 保持一致。
+        # Anima 的输入 latent 首先进入 x_embedder，因此它的权重
+        # dtype 才是当前模型最关键的实际计算 dtype。
         x_embedder = getattr(
             model,
             "x_embedder",
